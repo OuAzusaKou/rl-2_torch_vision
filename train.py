@@ -34,17 +34,18 @@ def create_argparser():
         description="""Training script for RL^2.""")
 
     ### Environment
-    ### Environment
     parser.add_argument("--environment", choices=['bandit', 'tabular_mdp', 'vision_mdp'],
                         default='vision_mdp')
+    parser.add_argument("--env_id", type=str, default='LunarLander-v2',
+                        help="Gym environment ID for vision_mdp. Options: LunarLander-v2, Acrobot-v1, MountainCar-v0, CarRacing-v2")
     parser.add_argument("--num_states", type=int, default=10,
                         help="Ignored if environment is bandit.")
-                        # num_action 5
-    parser.add_argument("--num_actions", type=int, default=2)
-    parser.add_argument("--max_episode_len", type=int, default=10,
+    parser.add_argument("--num_actions", type=int, default=4,
+                        help="Number of actions. Default 4 for LunarLander-v2")
+    parser.add_argument("--max_episode_len", type=int, default=1024,
                         help="Timesteps before automatic episode reset. " +
                              "Ignored if environment is bandit.")
-    parser.add_argument("--meta_episode_len", type=int, default=50,
+    parser.add_argument("--meta_episode_len", type=int, default=5120,
                         help="Timesteps per meta-episode.")
 
     ### Architecture
@@ -74,7 +75,7 @@ def create_argparser():
     return parser
 
 
-def create_env(environment, num_states, num_actions, max_episode_len):
+def create_env(environment, num_states, num_actions, max_episode_len, env_id=None):
     if environment == 'bandit':
         return BanditEnv(
             num_actions=num_actions)
@@ -88,7 +89,8 @@ def create_env(environment, num_states, num_actions, max_episode_len):
             num_states=num_states,
             num_actions=num_actions,
             max_episode_length=max_episode_len,
-            image_shape=(3, 64, 64))
+            image_shape=(3, 64, 64),
+            env_id=env_id or 'LunarLander-v2')
     raise NotImplementedError
 
 
@@ -189,7 +191,8 @@ def main():
         environment=args.environment,
         num_states=args.num_states,
         num_actions=args.num_actions,
-        max_episode_len=args.max_episode_len)
+        max_episode_len=args.max_episode_len,
+        env_id=args.env_id)
 
     # create learning system.
     policy_net = create_net(
