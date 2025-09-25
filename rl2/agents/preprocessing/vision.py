@@ -32,6 +32,48 @@ class VisionNet(abc.ABC, tc.nn.Module):
         pass
 
 
+class ConvVisionNet(VisionNet):
+    """
+    A simple CNN encoder that maps images [B, C, H, W] -> [B, F].
+    - Uses several Conv-BN-ReLU blocks with downsampling.
+    - AdaptiveAvgPool2d(1) + Linear projection to feature_dim.
+
+    Args:
+        in_channels: number of input channels C.
+        feature_dim: output embedding dimension F.
+        channels: an iterable defining the conv channel widths per stage.
+    """
+    def __init__(self, in_channels: int, feature_dim: int = 256,
+                 channels=(32, 64, 128)):
+        super().__init__()
+        layers = []
+        c_prev = in_channels
+        for i, c in enumerate(channels):
+            layers.append(tc.nn.Conv2d(c_prev, c, kernel_size=3, stride=2, padding=1, bias=False))
+            layers.append(tc.nn.BatchNorm2d(c))
+            layers.append(tc.nn.ReLU(inplace=True))
+            # an extra 3x3 stride-1 conv for capacity
+            layers.append(tc.nn.Conv2d(c, c, kernel_size=3, stride=1, padding=1, bias=False))
+            layers.append(tc.nn.BatchNorm2d(c))
+            layers.append(tc.nn.ReLU(inplace=True))
+            c_prev = c
+        self.backbone = tc.nn.Sequential(*layers)
+        self.pool = tc.nn.AdaptiveAvgPool2d((1, 1))
+        self.proj = tc.nn.Linear(c_prev, feature_dim)
+        self._output_dim = feature_dim
+
+    @property
+    def output_dim(self) -> int:
+        return self._output_dim
+
+    def forward(self, curr_obs: tc.FloatTensor) -> tc.FloatTensor:
+        # curr_obs: [B, C, H, W]
+        x = self.backbone(curr_obs.float())
+        x = self.pool(x).flatten(1)  # [B, C]
+        x = self.proj(x)             # [B, F]
+        return x
+
+
 class MDPPreprocessing(Preprocessing):
     def __init__(self, num_actions: int, vision_net: VisionNet):
         super().__init__()

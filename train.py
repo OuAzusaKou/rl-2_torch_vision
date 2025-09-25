@@ -9,6 +9,7 @@ import torch as tc
 
 from rl2.envs.bandit_env import BanditEnv
 from rl2.envs.mdp_env import MDPEnv
+from rl2.envs.vision_mdp_env import VisionMDPEnv
 
 from rl2.agents.preprocessing.tabular import MABPreprocessing, MDPPreprocessing
 from rl2.agents.architectures.gru import GRU
@@ -25,6 +26,7 @@ from rl2.utils.checkpoint_util import maybe_load_checkpoint, save_checkpoint
 from rl2.utils.comm_util import get_comm, sync_state
 from rl2.utils.constants import ROOT_RANK
 from rl2.utils.optim_util import get_weight_decay_param_groups
+from rl2.agents.preprocessing.vision import MDPPreprocessing as VisionMDPPreprocessing, ConvVisionNet
 
 
 def create_argparser():
@@ -32,15 +34,17 @@ def create_argparser():
         description="""Training script for RL^2.""")
 
     ### Environment
-    parser.add_argument("--environment", choices=['bandit', 'tabular_mdp'],
-                        default='bandit')
+    ### Environment
+    parser.add_argument("--environment", choices=['bandit', 'tabular_mdp', 'vision_mdp'],
+                        default='vision_mdp')
     parser.add_argument("--num_states", type=int, default=10,
                         help="Ignored if environment is bandit.")
-    parser.add_argument("--num_actions", type=int, default=5)
+                        # num_action 5
+    parser.add_argument("--num_actions", type=int, default=2)
     parser.add_argument("--max_episode_len", type=int, default=10,
                         help="Timesteps before automatic episode reset. " +
                              "Ignored if environment is bandit.")
-    parser.add_argument("--meta_episode_len", type=int, default=100,
+    parser.add_argument("--meta_episode_len", type=int, default=50,
                         help="Timesteps per meta-episode.")
 
     ### Architecture
@@ -55,7 +59,7 @@ def create_argparser():
 
     ### Training
     parser.add_argument("--max_pol_iters", type=int, default=12000)
-    parser.add_argument("--meta_episodes_per_policy_update", type=int, default=-1,
+    parser.add_argument("--meta_episodes_per_policy_update", type=int, default=100,
                         help="If -1, quantity is determined using a formula")
     parser.add_argument("--meta_episodes_per_learner_batch", type=int, default=60)
     parser.add_argument("--ppo_opt_epochs", type=int, default=8)
@@ -79,6 +83,12 @@ def create_env(environment, num_states, num_actions, max_episode_len):
             num_states=num_states,
             num_actions=num_actions,
             max_episode_length=max_episode_len)
+    if environment == 'vision_mdp':
+        return VisionMDPEnv(
+            num_states=num_states,
+            num_actions=num_actions,
+            max_episode_length=max_episode_len,
+            image_shape=(3, 64, 64))
     raise NotImplementedError
 
 
@@ -90,6 +100,11 @@ def create_preprocessing(environment, num_states, num_actions):
         return MDPPreprocessing(
             num_states=num_states,
             num_actions=num_actions)
+    if environment == 'vision_mdp':
+        vision_net = ConvVisionNet(in_channels=3, feature_dim=256)
+        return VisionMDPPreprocessing(
+            num_actions=num_actions,
+            vision_net=vision_net)
     raise NotImplementedError
 
 
