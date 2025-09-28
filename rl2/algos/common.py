@@ -24,6 +24,20 @@ class MetaEpisode:
         self.tdlam_rets = np.zeros(self.horizon, 'float32')
 
 
+# 新增：连续版的 MetaEpisode 与采样
+class MetaEpisodeCont:
+    def __init__(self, horizon: int, dummy_obs, action_dim: int):
+        self.horizon = horizon
+        self.obs = np.array([dummy_obs for _ in range(horizon)])
+        self.acs = np.zeros((horizon, action_dim), dtype=np.float32)
+        self.rews = np.zeros(horizon, dtype=np.float32)
+        self.dones = np.zeros(horizon, dtype=np.float32)
+        self.logpacs = np.zeros(horizon, dtype=np.float32)
+        self.vpreds = np.zeros(horizon, dtype=np.float32)
+        self.advs = np.zeros(horizon, dtype=np.float32)
+        self.tdlam_rets = np.zeros(horizon, dtype=np.float32)
+
+
 @tc.no_grad()
 def generate_meta_episode(
         env: MetaEpisodicEnv,
@@ -97,6 +111,69 @@ def generate_meta_episode(
 
     return meta_episode
 
+@tc.no_grad()
+def generate_meta_episode_cont(
+        env: MetaEpisodicEnv,
+        policy_net: StatefulPolicyNet,
+        value_net: StatefulValueNet,
+        meta_episode_len: int,
+        action_dim: int
+    ) -> MetaEpisodeCont:
+
+    env.new_env()
+    meta_episode = MetaEpisodeCont(
+        horizon=meta_episode_len,
+        dummy_obs=env.reset(),
+        action_dim=action_dim)
+
+    o_t = np.array([env.reset()])
+    a_tm1 = np.zeros((1, action_dim), dtype=np.float32)
+    r_tm1 = np.array([0.0], dtype=np.float32)
+    d_tm1 = np.array([1.0], dtype=np.float32)
+    h_tm1_policy_net = policy_net.initial_state(batch_size=1)
+    h_tm1_value_net = value_net.initial_state(batch_size=1)
+
+    for t in range(meta_episode_len):
+        pi_dist_t, h_t_policy_net = policy_net(
+            curr_obs=tc.FloatTensor(o_t),
+            prev_action=tc.FloatTensor(a_tm1),
+            prev_reward=tc.FloatTensor(r_tm1),
+            prev_done=tc.FloatTensor(d_tm1),
+            prev_state=h_tm1_policy_net)
+
+        vpred_t, h_t_value_net = value_net(
+            curr_obs=tc.FloatTensor(o_t),
+            prev_action=tc.FloatTensor(a_tm1),
+            prev_reward=tc.FloatTensor(r_tm1),
+            prev_done=tc.FloatTensor(d_tm1),
+            prev_state=h_tm1_value_net)
+
+        a_t = pi_dist_t.sample()                   # [1, A]
+        log_prob_a_t = pi_dist_t.log_prob(a_t)     # [1]
+
+        o_tp1, r_t, done_t, _ = env.step(
+            action=a_t.squeeze(0).cpu().numpy(),
+            auto_reset=True)
+
+        meta_episode.obs[t] = o_t[0]
+        meta_episode.acs[t] = a_t.squeeze(0).cpu().numpy()
+        meta_episode.rews[t] = float(r_t)
+        meta_episode.dones[t] = float(done_t)
+        meta_episode.logpacs[t] = float(log_prob_a_t.item())
+        meta_episode.vpreds[t] = float(vpred_t.squeeze(0).item())
+
+        o_t = np.array([o_tp1])
+        a_tm1 = np.array([meta_episode.acs[t]], dtype=np.float32)
+        r_tm1 = np.array([meta_episode.rews[t]], dtype=np.float32)
+        d_tm1 = np.array([meta_episode.dones[t]], dtype=np.float32)
+        h_tm1_policy_net = h_t_policy_net
+        h_tm1_value_net = h_t_value_net
+
+    return meta_episode
+
+
+
+
 
 @tc.no_grad()
 def assign_credit(
@@ -132,6 +209,13 @@ def assign_credit(
 
     meta_episode.tdlam_rets = meta_episode.vpreds + meta_episode.advs
     return meta_episode
+
+
+
+
+
+
+
 
 
 def huber_func(y_pred, y_true, delta=1.0):

@@ -115,3 +115,34 @@ class MDPPreprocessing(Preprocessing):
         vec = tc.cat(
             (emb_o, emb_a, prev_reward, prev_done), dim=-1).float()
         return vec
+
+class MDPPreprocessingContinuous(Preprocessing):
+    """
+    For continuous action: concat [vision_embedding, prev_action (float A-dim), reward, done]
+    """
+    def __init__(self, action_dim: int, vision_net: VisionNet):
+        super().__init__()
+        self._action_dim = action_dim
+        self._vision_net = vision_net
+
+    @property
+    def output_dim(self):
+        return self._vision_net.output_dim + self._action_dim + 2
+
+    def forward(
+        self,
+        curr_obs: tc.FloatTensor,
+        prev_action: tc.FloatTensor,
+        prev_reward: tc.FloatTensor,
+        prev_done: tc.FloatTensor
+    ) -> tc.FloatTensor:
+        curr_obs_shape = list(curr_obs.shape)
+        curr_obs = curr_obs.view(-1, *curr_obs_shape[-3:])
+        emb_o = self._vision_net(curr_obs)
+        emb_o = emb_o.view(*curr_obs_shape[:-3], emb_o.shape[-1])
+
+        # prev_action expected shape [..., A]
+        prev_reward = prev_reward.unsqueeze(-1)
+        prev_done = prev_done.unsqueeze(-1)
+        vec = tc.cat((emb_o, prev_action.float(), prev_reward, prev_done), dim=-1).float()
+        return vec

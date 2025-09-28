@@ -87,19 +87,29 @@ class VisionMDPEnv(MetaEpisodicEnv[np.ndarray]):
         return img
 
     def new_env(self) -> None:
-        # 重新创建底层环境，使元回合之间存在差异
         if self._env is not None:
             self._env.close()
         seed = self._seed if self._seed is not None else np.random.randint(0, 2**31 - 1)
         self._env = self._make_env(seed=seed)
-        # 校验动作空间
-        if not hasattr(self._env.action_space, "n"):
-            raise ValueError(f"Env {self._env_id} does not have discrete action space.")
-        env_actions = int(self._env.action_space.n)
-        if env_actions != self._num_actions:
-            raise ValueError(
-                f"动作数量不匹配: 期望 {self._num_actions}, 但底层 {self._env_id} 为 {env_actions}。"
-            )
+
+        space = self._env.action_space
+        # 支持 Discrete(n) 与 Box(shape=(A,))
+        if hasattr(space, "n"):
+            env_actions = int(space.n)
+            if env_actions != self._num_actions:
+                raise ValueError(f"动作数量不匹配: 期望 {self._num_actions}, 但底层 {self._env_id} 为 {env_actions}。")
+            self._is_discrete = True
+            self._action_low = None
+            self._action_high = None
+        elif hasattr(space, "shape"):
+            assert len(space.shape) == 1, "仅支持一维 Box 连续动作"
+            self._is_discrete = False
+            self._num_actions = int(space.shape[0])
+            self._action_low = np.array(space.low, dtype=np.float32)
+            self._action_high = np.array(space.high, dtype=np.float32)
+        else:
+            raise ValueError(f"Unsupported action space: {space}")
+
         self._ep_steps_so_far = 0
 
     def reset(self) -> np.ndarray:
@@ -107,16 +117,19 @@ class VisionMDPEnv(MetaEpisodicEnv[np.ndarray]):
         self._env.reset()
         return self._get_image_obs()
 
-    def step(self, action: int, auto_reset: bool = True) -> Tuple[np.ndarray, float, bool, dict]:
+    def step(self, action, auto_reset: bool = True):
         self._ep_steps_so_far += 1
-        info = {}
-        _obs, reward, terminated, truncated, info = self._env.step(action)
+        if getattr(self, "_is_discrete", True):
+            a = int(action)
+        else:
+            a = np.asarray(action, dtype=np.float32)
+            if self._action_low is not None:
+                a = np.clip(a, self._action_low, self._action_high)
+        _obs, reward, terminated, truncated, info = self._env.step(a)
         done_env = bool(terminated or truncated)
-
         done_len = not (self._ep_steps_so_far < self._max_ep_length)
         done_t = bool(done_env or done_len)
         obs_tp1 = self._get_image_obs()
-        # print(f"obs_tp1: {obs_tp1.shape}")
         if done_t and auto_reset:
             obs_tp1 = self.reset()
         return obs_tp1, float(reward), done_t, info

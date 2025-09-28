@@ -18,6 +18,8 @@ from rl2.algos.common import (
     generate_meta_episode,
     assign_credit,
     huber_func,
+    MetaEpisodeCont,
+    generate_meta_episode_cont,
 )
 from rl2.utils.comm_util import sync_grads
 from rl2.utils.constants import ROOT_RANK
@@ -120,6 +122,66 @@ def compute_losses(
     }
 
 
+
+def compute_losses_cont(meta_episodes, policy_net, value_net, clip_param, ent_coef):
+    import numpy as np, torch as tc
+
+    def get_tensor(field, dtype=None):
+        mb_field = np.stack([getattr(m, field) for m in meta_episodes], axis=0)
+        return tc.FloatTensor(mb_field)
+
+    mb_obs = get_tensor('obs')
+    mb_acs = get_tensor('acs')          # [B, T, A]
+    mb_rews = get_tensor('rews')
+    mb_dones = get_tensor('dones')
+    mb_logpacs = get_tensor('logpacs')
+    mb_advs = get_tensor('advs')
+    mb_tdlam_rets = get_tensor('tdlam_rets')
+
+    B, T, A = mb_acs.shape
+    ac_dummy = tc.zeros(dtype=tc.float32, size=(B, A))
+    rew_dummy = tc.zeros(dtype=tc.float32, size=(B,))
+    done_dummy = tc.ones(dtype=tc.float32, size=(B,))
+
+    curr_obs = mb_obs
+    prev_action = tc.cat((ac_dummy.unsqueeze(1), mb_acs[:, 0:-1, :]), dim=1)
+    prev_reward = tc.cat((rew_dummy.unsqueeze(1), mb_rews[:, 0:-1]), dim=1)
+    prev_done = tc.cat((done_dummy.unsqueeze(1), mb_dones[:, 0:-1]), dim=1)
+    prev_state_policy_net = policy_net.initial_state(batch_size=B)
+    prev_state_value_net = value_net.initial_state(batch_size=B)
+
+    pi_dists, _ = policy_net(curr_obs=curr_obs, prev_action=prev_action,
+                             prev_reward=prev_reward, prev_done=prev_done,
+                             prev_state=prev_state_policy_net)
+    vpreds, _ = value_net(curr_obs=curr_obs, prev_action=prev_action,
+                          prev_reward=prev_reward, prev_done=prev_done,
+                          prev_state=prev_state_value_net)
+
+    entropies = pi_dists.entropy()
+    logpacs_new = pi_dists.log_prob(mb_acs)
+    vpreds_new = vpreds
+
+    meanent = tc.mean(entropies)
+    policy_entropy_bonus = ent_coef * meanent
+
+    policy_ratios = tc.exp(logpacs_new - mb_logpacs)
+    clipped_policy_ratios = tc.clip(policy_ratios, 1-clip_param, 1+clip_param)
+    surr1 = mb_advs * policy_ratios
+    surr2 = mb_advs * clipped_policy_ratios
+    policy_surrogate_objective = tc.mean(tc.min(surr1, surr2))
+    policy_loss = -(policy_surrogate_objective + policy_entropy_bonus)
+
+    
+    value_loss = tc.mean(huber_func(mb_tdlam_rets, vpreds_new))
+    clipfrac = tc.mean(tc.greater(surr1, surr2).float())
+    return {"policy_loss": policy_loss, 
+            "value_loss": value_loss,
+            "meanent": meanent, 
+            "clipfrac": clipfrac}
+
+
+
+
 def training_loop(
         env: MetaEpisodicEnv,
         policy_net: StatefulPolicyNet,
@@ -142,6 +204,7 @@ def training_loop(
         policy_checkpoint_fn: Callable[[int], None],
         value_checkpoint_fn: Callable[[int], None],
         comm: type(MPI.COMM_WORLD),
+        action_space: str = 'discrete',
     ) -> None:
     """
     Train a stateful RL^2 agent via PPO to maximize discounted cumulative reward
@@ -181,7 +244,15 @@ def training_loop(
         meta_episodes = list()
         for _ in range(0, meta_episodes_per_policy_update):
             # collect one meta-episode and append it to the list
-            meta_episode = generate_meta_episode(
+            if action_space == 'continuous':
+                meta_episode = generate_meta_episode_cont(
+                    env=env,
+                    policy_net=policy_net,
+                    value_net=value_net,
+                    meta_episode_len=meta_episode_len,
+                    action_dim=env._env.action_space.shape[0])
+            else:
+                meta_episode = generate_meta_episode(
                 env=env,
                 policy_net=policy_net,
                 value_net=value_net,
@@ -228,7 +299,15 @@ def training_loop(
             for i in range(0, meta_episodes_per_policy_update, meta_episodes_per_learner_batch):
                 mb_idxs = idxs[i:i+meta_episodes_per_learner_batch]
                 mb_meta_eps = [meta_episodes[idx] for idx in mb_idxs]
-                losses = compute_losses(
+                if action_space == 'continuous':
+                    losses = compute_losses_cont(
+                        meta_episodes=mb_meta_eps,
+                        policy_net=policy_net,
+                        value_net=value_net,
+                        clip_param=ppo_clip_param,
+                        ent_coef=ppo_ent_coef)
+                else:
+                    losses = compute_losses(
                     meta_episodes=mb_meta_eps,
                     policy_net=policy_net,
                     value_net=value_net,

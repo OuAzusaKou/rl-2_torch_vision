@@ -18,6 +18,7 @@ from rl2.agents.architectures.snail import SNAIL
 from rl2.agents.architectures.transformer import Transformer
 from rl2.agents.heads.policy_heads import LinearPolicyHead
 from rl2.agents.heads.value_heads import LinearValueHead
+from rl2.agents.heads.policy_heads import GaussianPolicyHead
 from rl2.agents.integration.policy_net import StatefulPolicyNet
 from rl2.agents.integration.value_net import StatefulValueNet
 from rl2.algos.ppo import training_loop
@@ -26,8 +27,9 @@ from rl2.utils.checkpoint_util import maybe_load_checkpoint, save_checkpoint
 from rl2.utils.comm_util import get_comm, sync_state
 from rl2.utils.constants import ROOT_RANK
 from rl2.utils.optim_util import get_weight_decay_param_groups
-from rl2.agents.preprocessing.vision import MDPPreprocessing as VisionMDPPreprocessing, ConvVisionNet
 
+from rl2.agents.preprocessing.vision import MDPPreprocessing as VisionMDPPreprocessing, ConvVisionNet
+from rl2.agents.preprocessing.vision import MDPPreprocessingContinuous as VisionMDPPreprocessingContinuous
 
 def create_argparser():
     parser = argparse.ArgumentParser(
@@ -36,16 +38,16 @@ def create_argparser():
     ### Environment
     parser.add_argument("--environment", choices=['bandit', 'tabular_mdp', 'vision_mdp'],
                         default='vision_mdp')
-    parser.add_argument("--env_id", type=str, default='LunarLander-v2',
-                        help="Gym environment ID for vision_mdp. Options: LunarLander-v2, Acrobot-v1, MountainCar-v0, CarRacing-v2")
+    parser.add_argument("--env_id", type=str, default='LunarLanderContinuous-v2',
+                        help="Gym environment ID for vision_mdp. Options: LunarLander-v2, Acrobot-v1, MountainCar-v0, CarRacing-v2, LunarLanderContinuous-v2")
     parser.add_argument("--num_states", type=int, default=10,
                         help="Ignored if environment is bandit.")
-    parser.add_argument("--num_actions", type=int, default=4,
+    parser.add_argument("--num_actions", type=int, default=2,
                         help="Number of actions. Default 4 for LunarLander-v2")
-    parser.add_argument("--max_episode_len", type=int, default=1024,
+    parser.add_argument("--max_episode_len", type=int, default=10,
                         help="Timesteps before automatic episode reset. " +
                              "Ignored if environment is bandit.")
-    parser.add_argument("--meta_episode_len", type=int, default=5120,
+    parser.add_argument("--meta_episode_len", type=int, default=50,
                         help="Timesteps per meta-episode.")
 
     ### Architecture
@@ -72,6 +74,8 @@ def create_argparser():
     parser.add_argument("--adam_lr", type=float, default=2e-4)
     parser.add_argument("--adam_eps", type=float, default=1e-5)
     parser.add_argument("--adam_wd", type=float, default=0.01)
+    parser.add_argument("--action_space", choices=['discrete', 'continuous'], default='continuous',
+                        help="Action space type for vision_mdp environment.")
     return parser
 
 
@@ -94,19 +98,16 @@ def create_env(environment, num_states, num_actions, max_episode_len, env_id=Non
     raise NotImplementedError
 
 
-def create_preprocessing(environment, num_states, num_actions):
+def create_preprocessing(environment, num_states, num_actions, action_space):
     if environment == 'bandit':
-        return MABPreprocessing(
-            num_actions=num_actions)
+        return MABPreprocessing(num_actions=num_actions)
     if environment == 'tabular_mdp':
-        return MDPPreprocessing(
-            num_states=num_states,
-            num_actions=num_actions)
+        return MDPPreprocessing(num_states=num_states, num_actions=num_actions)
     if environment == 'vision_mdp':
         vision_net = ConvVisionNet(in_channels=3, feature_dim=256)
-        return VisionMDPPreprocessing(
-            num_actions=num_actions,
-            vision_net=vision_net)
+        if action_space == 'continuous':
+            return VisionMDPPreprocessingContinuous(action_dim=num_actions, vision_net=vision_net)
+        return VisionMDPPreprocessing(num_actions=num_actions, vision_net=vision_net)
     raise NotImplementedError
 
 
@@ -140,8 +141,12 @@ def create_architecture(architecture, input_dim, num_features, context_size):
     raise NotImplementedError
 
 
-def create_head(head_type, num_features, num_actions):
+def create_head(head_type, num_features, num_actions, action_space):
     if head_type == 'policy':
+        if action_space == 'continuous':
+            return GaussianPolicyHead(
+                num_features=num_features,
+                action_dim=num_actions)
         return LinearPolicyHead(
             num_features=num_features,
             num_actions=num_actions)
@@ -153,21 +158,25 @@ def create_head(head_type, num_features, num_actions):
 
 def create_net(
         net_type, environment, architecture, num_states, num_actions,
-        num_features, context_size
+        num_features, context_size, action_space
 ):
     preprocessing = create_preprocessing(
         environment=environment,
         num_states=num_states,
-        num_actions=num_actions)
+        num_actions=num_actions,
+        action_space=action_space)  # 新增入参
+
     architecture = create_architecture(
         architecture=architecture,
         input_dim=preprocessing.output_dim,
         num_features=num_features,
         context_size=context_size)
+
     head = create_head(
         head_type=net_type,
         num_features=architecture.output_dim,
-        num_actions=num_actions)
+        num_actions=num_actions,
+        action_space=action_space)  # 新增入参
 
     if net_type == 'policy':
         return StatefulPolicyNet(
@@ -202,7 +211,8 @@ def main():
         num_states=args.num_states,
         num_actions=args.num_actions,
         num_features=args.num_features,
-        context_size=args.meta_episode_len)
+        context_size=args.meta_episode_len,
+        action_space=args.action_space)
 
     value_net = create_net(
         net_type='value',
@@ -211,7 +221,8 @@ def main():
         num_states=args.num_states,
         num_actions=args.num_actions,
         num_features=args.num_features,
-        context_size=args.meta_episode_len)
+        context_size=args.meta_episode_len,
+        action_space=args.action_space)
 
     policy_optimizer = tc.optim.AdamW(
         get_weight_decay_param_groups(policy_net, args.adam_wd),
@@ -310,7 +321,9 @@ def main():
         pol_iters_so_far=pol_iters_so_far,
         policy_checkpoint_fn=policy_checkpoint_fn,
         value_checkpoint_fn=value_checkpoint_fn,
-        comm=comm)
+        comm=comm,
+        action_space=args.action_space,  # 新增
+    )
 
 
 if __name__ == '__main__':
